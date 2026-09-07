@@ -432,13 +432,19 @@ For a single H200, the optional
 deployment places both the talker and codec on logical GPU 0:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 vllm serve OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5 \
+CUDA_VISIBLE_DEVICES=0 VLLM_OMNI_EVENT_DRIVEN_ORCH=1 \
+    vllm serve OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5 \
     --omni --trust-remote-code \
-    --deploy-config vllm_omni/deploy/moss_tts_local_h200.yaml
+    --deploy-config vllm_omni/deploy/moss_tts_local_h200.yaml \
+    --disable-log-stats
 ```
 
 Run from the repository root and select an available physical GPU with
-`CUDA_VISIBLE_DEVICES`. This preset configures 256 request slots per stage,
+`CUDA_VISIBLE_DEVICES`. The command enables event-driven orchestration and
+disables detailed per-request statistics logging to reduce CPU overhead at
+high concurrency. Remove `--disable-log-stats` when those statistics are needed;
+keep these settings identical when comparing performance.
+This preset configures 256 request slots per stage,
 a 32 GiB talker KV cache, talker CUDA Graph buckets through 512 scheduled tokens,
 and codec batch buckets through 256. It requires more than 80 GiB of GPU memory;
 request capacity also depends on input and generated lengths. The default

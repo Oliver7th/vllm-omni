@@ -354,7 +354,9 @@ class OmniBase(PDDisaggregationMixin):
         if len(normalized) != self.num_stages:
             raise ValueError(f"Expected {self.num_stages} sampling params, got {len(normalized)}")
 
-        if sampling_params_list is not None:
+        # Streaming coercion may also change a constrained output kind in
+        # the defaults (for example, an internal TTS stage's FINAL_ONLY).
+        if sampling_params_list is not None or allow_delta_coercion:
             normalized = [
                 self._apply_sampling_constraints(params, constraints)
                 for params, constraints in zip(normalized, self.sampling_constraints_list, strict=True)
