@@ -1971,7 +1971,11 @@ class OmniGPUModelRunner(GPUModelRunner):
         if start_offsets == list(range(decode_batch_size)):
             inputs_embeds[:decode_batch_size].copy_(req_embeds[:decode_batch_size])
         else:
-            offsets = torch.tensor(start_offsets, device=inputs_embeds.device, dtype=torch.long)
+            # A device tensor constructor waits for the preceding MTP graph.
+            # Enqueue the small host index transfer without synchronizing it.
+            offsets = torch.tensor(start_offsets, device="cpu", dtype=torch.long).to(
+                inputs_embeds.device, non_blocking=True
+            )
             inputs_embeds.index_copy_(0, offsets, req_embeds[:decode_batch_size])
         if code_predictor_codes is not None:
             if out_key in getattr(self.model, "gpu_resident_buffer_keys", set()):

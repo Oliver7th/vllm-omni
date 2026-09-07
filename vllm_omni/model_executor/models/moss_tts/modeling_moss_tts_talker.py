@@ -1704,7 +1704,10 @@ class MossTTSLocalTalkerForGeneration(nn.Module):
                 self._batch_should_continue = active
             else:
                 self._batch_should_continue = torch.ones(len(info_dicts), device=hidden.device, dtype=torch.bool)
-                indices = torch.tensor(should_indices, device=hidden.device, dtype=torch.long)
+                # Keep mixed prefill/decode output packing asynchronous.
+                indices = torch.tensor(should_indices, device="cpu", dtype=torch.long).to(
+                    hidden.device, non_blocking=True
+                )
                 self._batch_should_continue.index_copy_(0, indices, active)
 
         if not have_codes:
