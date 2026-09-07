@@ -43,7 +43,7 @@ V1 does not include:
 ## Motivation and use cases
 
 For investigating CPU memory retained by dependency tensor materialization,
-see the [standalone safetensors diagnostic](../../../benchmarks/host_weight_runtime/README.md).
+see the [standalone safetensors diagnostic](https://github.com/vllm-project/vllm-omni/blob/main/benchmarks/host_weight_runtime/README.md).
 It distinguishes repeated dependency calls from reuse of cached views and does
 not establish per-request HWR leakage.
 
