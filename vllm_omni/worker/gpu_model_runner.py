@@ -1968,11 +1968,25 @@ class OmniGPUModelRunner(GPUModelRunner):
         if start_offsets is None:
             id_to_index = self.input_batch.req_id_to_index
             start_offsets = [int(self.query_start_loc.cpu[id_to_index[req_id]]) for req_id in decode_req_ids]
-        for idx, (req_id, start_offset) in enumerate(zip(decode_req_ids, start_offsets, strict=True)):
-            inputs_embeds[start_offset : start_offset + 1] = req_embeds[idx : idx + 1]
-            if code_predictor_codes is not None:
-                update_dict = {out_key[0]: {out_key[1]: code_predictor_codes[idx : idx + 1]}}
-                self._update_intermediate_buffer(req_id, update_dict)
+        if start_offsets == list(range(decode_batch_size)):
+            inputs_embeds[:decode_batch_size].copy_(req_embeds[:decode_batch_size])
+        else:
+            offsets = torch.tensor(start_offsets, device=inputs_embeds.device, dtype=torch.long)
+            inputs_embeds.index_copy_(0, offsets, req_embeds[:decode_batch_size])
+        if code_predictor_codes is not None:
+            if out_key in getattr(self.model, "gpu_resident_buffer_keys", set()):
+                # One owned batch snapshot protects all rows from graph reuse.
+                owned_codes = code_predictor_codes[:decode_batch_size].detach().clone()
+                for req_id, row in zip(decode_req_ids, owned_codes.split(1), strict=True):
+                    req_state = self.requests.get(req_id)
+                    if req_state is not None:
+                        existing = self.model_intermediate_buffer.setdefault(req_id, {})
+                        existing.setdefault(out_key[0], {})[out_key[1]] = row
+                        req_state.additional_information_cpu = existing
+            else:
+                for idx, req_id in enumerate(decode_req_ids):
+                    update_dict = {out_key[0]: {out_key[1]: code_predictor_codes[idx : idx + 1]}}
+                    self._update_intermediate_buffer(req_id, update_dict)
 
     def _model_forward(
         self,

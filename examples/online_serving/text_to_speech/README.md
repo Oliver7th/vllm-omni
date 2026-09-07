@@ -425,6 +425,40 @@ python examples/online_serving/text_to_speech/ming_flash_omni_tts/speech_client.
 
 ---
 
+## MOSS-TTS Local Transformer v1.5
+
+For a single H200, the optional
+[`moss_tts_local_h200.yaml`](../../../vllm_omni/deploy/moss_tts_local_h200.yaml)
+deployment places both the talker and codec on logical GPU 0:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 vllm serve OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5 \
+    --omni --trust-remote-code \
+    --deploy-config vllm_omni/deploy/moss_tts_local_h200.yaml
+```
+
+Run from the repository root and select an available physical GPU with
+`CUDA_VISIBLE_DEVICES`. This preset configures 256 request slots per stage,
+a 32 GiB talker KV cache, talker CUDA Graph buckets through 512 scheduled tokens,
+and codec batch buckets through 256. It requires more than 80 GiB of GPU memory;
+request capacity also depends on input and generated lengths. The default
+[`moss_tts_local.yaml`](../../../vllm_omni/deploy/moss_tts_local.yaml) remains
+available for smaller deployments.
+
+The preset enables the optional codec backend with
+`hf_overrides.codec_attention_backend: triton` on stage 1. It preserves the
+streaming ring-cache mask and uses BF16 attention with 64-dimensional heads;
+other attention shapes use PyTorch SDPA. Set the backend to `sdpa` to use the
+default attention implementation. Codec terminal tails share execution only
+when they already map to the same padded CUDA Graph; returned audio retains
+each request's actual length.
+
+Voice cloning requests use `ref_audio` and `ref_text`. For streaming output,
+set `stream: true`, `stream_format: "audio"`, and `response_format: "pcm"`;
+the native PCM format is 48 kHz, stereo, signed 16-bit little-endian. Compute
+audio throughput as `PCM bytes / (48000 * 2 * 2) / elapsed seconds`, and compare
+the same requests, concurrency, and reference-cache state.
+
 ## MOSS-TTS-Nano
 
 Single-stage 0.1B AR LM + MOSS-Audio-Tokenizer-Nano codec at 48 kHz mono. Every request must include `ref_audio`; there are no built-in speaker presets.

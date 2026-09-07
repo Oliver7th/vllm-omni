@@ -87,14 +87,39 @@ def _clone_cuda_tensor_payload(value: Any, sources: list[torch.Tensor]) -> Any:
         return value.detach().clone()
     if isinstance(value, dict):
         return {k: _clone_cuda_tensor_payload(v, sources) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_clone_cuda_tensor_payload(v, sources) for v in value]
-    if isinstance(value, tuple):
-        return tuple(_clone_cuda_tensor_payload(v, sources) for v in value)
+    if isinstance(value, (list, tuple)):
+        if (
+            value
+            and all(
+                isinstance(v, torch.Tensor)
+                and v.is_cuda
+                and v.dtype == value[0].dtype
+                and v.device == value[0].device
+                and v.layout == torch.strided
+                and v.is_contiguous()
+                for v in value
+            )
+            # Keep frame/state packing bounded; large payloads use individual snapshots.
+            and sum(v.numel() * v.element_size() for v in value) <= 1024 * 1024
+        ):
+            packed = torch.cat([v.detach().reshape(-1) for v in value])
+            sources.append(packed)
+            return _PackedTensorPayload(packed, [v.shape for v in value], isinstance(value, tuple))
+        items = [_clone_cuda_tensor_payload(v, sources) for v in value]
+        return tuple(items) if isinstance(value, tuple) else items
     return value
 
 
 def _copy_tensor_payload_to_cpu(value: Any, pin_memory: bool) -> Any:
+    if isinstance(value, _PackedTensorPayload):
+        flat = _copy_tensor_payload_to_cpu(value.tensor, pin_memory)
+        items = []
+        offset = 0
+        for shape in value.shapes:
+            count = shape.numel()
+            items.append(flat[offset : offset + count].view(shape))
+            offset += count
+        return tuple(items) if value.is_tuple else items
     if isinstance(value, torch.Tensor):
         if value.device.type != "cuda":
             return value
@@ -108,6 +133,12 @@ def _copy_tensor_payload_to_cpu(value: Any, pin_memory: bool) -> Any:
     if isinstance(value, tuple):
         return tuple(_copy_tensor_payload_to_cpu(v, pin_memory) for v in value)
     return value
+
+
+class _PackedTensorPayload(NamedTuple):
+    tensor: torch.Tensor
+    shapes: list[torch.Size]
+    is_tuple: bool
 
 
 class _AsyncCPUPayloadSnapshot:
