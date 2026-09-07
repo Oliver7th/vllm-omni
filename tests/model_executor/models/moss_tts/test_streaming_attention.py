@@ -16,10 +16,9 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cuda]
 
 
 @pytest.mark.parametrize(
-    "batch,heads,queries,keys", [(1, 20, 1, 125), (4, 20, 15, 125), (1, 12, 480, 400), (4, 12, 32, 250)]
+    "batch,heads,queries,keys", [(2, 20, 1, 125), (4, 20, 15, 125), (1, 12, 480, 400), (4, 12, 32, 250)]
 )
-@pytest.mark.parametrize("empty_mask", [False, True])
-def test_masked_attention_matches_sdpa_with_strides_and_invalid_rows(batch, heads, queries, keys, empty_mask):
+def test_masked_attention_matches_sdpa_with_strides_and_invalid_rows(batch, heads, queries, keys):
     torch.manual_seed(7)
     q = torch.randn(batch, queries, 3, heads, 64, device="cuda", dtype=torch.bfloat16)[:, :, 0].permute(0, 2, 1, 3)
     k = torch.randn(batch, heads, keys, 64, device="cuda", dtype=torch.bfloat16)
@@ -27,14 +26,12 @@ def test_masked_attention_matches_sdpa_with_strides_and_invalid_rows(batch, head
     positions = torch.arange(keys, device="cuda").roll(17)
     query_positions = torch.arange(queries, device="cuda") + keys - queries
     mask = (positions[None, :] <= query_positions[:, None])[None, None].expand(batch, 1, -1, -1).clone()
-    if empty_mask:
-        mask.zero_()
+    mask[0, :, 0] = False  # Cover an all-masked row alongside valid rows.
     actual = masked_attention(q, k, v, mask)
     expected = F.scaled_dot_product_attention(q, k, v, mask)
     assert bool(actual.isfinite().all())
     torch.testing.assert_close(actual, expected, atol=0.008, rtol=0.01)
-    if empty_mask:
-        assert actual.count_nonzero() == 0
+    assert actual[0, :, 0].count_nonzero() == 0
 
 
 def test_streaming_attention_preserves_ring_wrap_reordering_and_slot_reset():
