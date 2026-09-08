@@ -659,8 +659,15 @@ def _compute_pcm_hnr_db(pcm_samples: np.ndarray, sr: int = _PCM_SPEECH_SAMPLE_RA
     return float(np.mean(hnr_values)) if hnr_values else 0.0
 
 
-def _assert_pcm_int16_speech_hnr(audio_bytes: bytes, min_hnr_db: float = _MIN_PCM_SPEECH_HNR_DB) -> None:
+def _assert_pcm_int16_speech_hnr(
+    audio_bytes: bytes,
+    min_hnr_db: float = _MIN_PCM_SPEECH_HNR_DB,
+    sample_rate: int = _PCM_SPEECH_SAMPLE_RATE_HZ,
+) -> None:
     """Validate harmonic-to-noise ratio on raw int16 PCM from /v1/audio/speech.
+
+    sample_rate must describe the returned PCM: using the wrong rate changes
+    both the analysis window and the 80-400 Hz pitch search range.
 
     min_hnr_db defaults to the global _MIN_PCM_SPEECH_HNR_DB (1.0 dB),
     which matches the cleaner TTS models the helper was originally calibrated
@@ -672,7 +679,7 @@ def _assert_pcm_int16_speech_hnr(audio_bytes: bytes, min_hnr_db: float = _MIN_PC
     assert audio_bytes is not None and len(audio_bytes) >= 2, "missing PCM bytes"
     assert len(audio_bytes) % 2 == 0, "PCM byte length must be aligned to int16"
     pcm_samples = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-    hnr = _compute_pcm_hnr_db(pcm_samples)
+    hnr = _compute_pcm_hnr_db(pcm_samples, sr=sample_rate)
     print(f"PCM speech HNR: {hnr:.2f} dB (threshold: {min_hnr_db} dB)")
     assert hnr >= min_hnr_db, (
         f"Audio distortion detected: HNR={hnr:.2f} dB < {min_hnr_db} dB. "
@@ -934,7 +941,12 @@ def assert_audio_speech_response(response: Any, request_config: dict[str, Any], 
     if run_level in {"advanced_model", "full_model"}:
         if req_fmt == "pcm" and response.audio_bytes:
             min_hnr_db = float(request_config.get("min_hnr_db", _MIN_PCM_SPEECH_HNR_DB))
-            _assert_pcm_int16_speech_hnr(response.audio_bytes, min_hnr_db=min_hnr_db)
+            # Raw PCM has no sample-rate header. An explicit output rate takes
+            # precedence; otherwise tests can declare the model's native rate.
+            pcm_sample_rate = int(
+                request_config.get("sample_rate") or request_config.get("pcm_sample_rate", _PCM_SPEECH_SAMPLE_RATE_HZ)
+            )
+            _assert_pcm_int16_speech_hnr(response.audio_bytes, min_hnr_db=min_hnr_db, sample_rate=pcm_sample_rate)
 
         transcript = _resolve_audio_transcript(response, request_config, run_level, speech_api=True)
         if transcript is not None:

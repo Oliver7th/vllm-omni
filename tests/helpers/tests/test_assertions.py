@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from tests.helpers import assertions
@@ -13,6 +14,33 @@ from tests.helpers.assertions import (
 )
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
+
+def test_pcm_hnr_uses_native_sample_rate():
+    # A 120 Hz voice at 48 kHz is misread as 60 Hz by a 24 kHz check,
+    # below the helper's 80 Hz lower pitch bound.
+    time = np.arange(48_000) / 48_000
+    pcm = (0.5 * np.sin(2 * np.pi * 120 * time) * 32767).astype(np.int16).tobytes()
+    assertions._assert_pcm_int16_speech_hnr(pcm, sample_rate=48_000)
+    with pytest.raises(AssertionError, match="Audio distortion"):
+        assertions._assert_pcm_int16_speech_hnr(pcm, sample_rate=24_000)
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_rate"),
+    [({}, 24_000), ({"pcm_sample_rate": 48_000}, 48_000), ({"sample_rate": 8_000, "pcm_sample_rate": 48_000}, 8_000)],
+)
+def test_speech_pcm_hnr_rate_selection(monkeypatch, config, expected_rate):
+    captured = {}
+
+    def capture_hnr(audio_bytes, min_hnr_db, sample_rate):
+        captured["sample_rate"] = sample_rate
+
+    monkeypatch.setattr(assertions, "_assert_pcm_int16_speech_hnr", capture_hnr)
+    monkeypatch.setattr(assertions, "_resolve_audio_transcript", lambda *a, **kw: None)
+    response = SimpleNamespace(success=True, audio_bytes=b"\x00\x00", audio_format="audio/pcm")
+    assert_audio_speech_response(response, {"response_format": "pcm", **config}, "full_model")
+    assert captured["sample_rate"] == expected_rate
 
 
 def test_short_transcript_repeat_passes_containment_fallback():
