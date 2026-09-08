@@ -82,7 +82,10 @@ def _flash_attn3_hub_available() -> bool:
         try:
             from kernels import get_kernel
 
-            get_kernel("kernels-community/flash-attn3")
+            # Match Diffusers' _flash_3_hub kernel version. kernels >= 0.15
+            # rejects an unversioned request even when a compatible build
+            # exists, incorrectly forcing the SDPA comparison path.
+            get_kernel("kernels-community/flash-attn3", version=1)
             _FLASH_ATTN3_HUB_AVAILABLE = True
         except Exception as exc:
             print(f"kernels-community/flash-attn3 unavailable ({exc}); using matched torch SDPA on both sides.")
