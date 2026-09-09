@@ -685,7 +685,101 @@ def test_npu_varlen_opt_in_unset_takes_mask_path(monkeypatch):
     assert out is fake_forward.return_value
 
 
-# --- Test group C: laser input pre-scaling in _forward_prefix_kv_slice_npu --
+# --- Test group C: causal-mask materialization and composition ---------------
+
+
+@pytest.mark.parametrize(("query_length", "key_length"), [(4, 4), (2, 4), (4, 2)])
+def test_npu_causal_mask_uses_bottom_right_alignment(monkeypatch, query_length, key_length):
+    captured: dict = {}
+
+    def fake_attention_forward(query, key, value, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(query)
+
+    _fake_mindiesd(monkeypatch, attention_forward=fake_attention_forward)
+    impl = _npu_impl(causal=True)
+    query = torch.randn(1, query_length, 2, 4)
+    key = torch.randn(1, key_length, 2, 4)
+
+    impl.forward_fa_npu(query, key, key)
+
+    query_positions = torch.arange(query_length).unsqueeze(1)
+    key_positions = torch.arange(key_length).unsqueeze(0)
+    expected = key_positions <= query_positions + (key_length - query_length)
+    expected = expected[None, None]
+    assert torch.equal(captured["attn_mask"], expected)
+    assert captured["attn_mask"].is_contiguous()
+
+
+def test_npu_causal_mask_combines_with_explicit_keep_mask(monkeypatch):
+    captured: dict = {}
+
+    def fake_attention_forward(query, key, value, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(query)
+
+    _fake_mindiesd(monkeypatch, attention_forward=fake_attention_forward)
+    impl = _npu_impl(causal=True)
+    query = torch.randn(2, 3, 2, 4)
+    key = torch.randn(2, 5, 2, 4)
+    keep_mask = torch.tensor(
+        [
+            [True, True, True, True, False],
+            [True, True, True, False, False],
+        ]
+    )
+
+    impl.forward_fa_npu(query, key, key, AttentionMetadata(attn_mask=keep_mask))
+
+    query_positions = torch.arange(query.shape[1]).unsqueeze(1)
+    key_positions = torch.arange(key.shape[1]).unsqueeze(0)
+    causal_mask = key_positions <= query_positions + (key.shape[1] - query.shape[1])
+    expected = keep_mask[:, None, None, :] & causal_mask[None, None]
+    assert torch.equal(captured["attn_mask"], expected)
+    assert captured["attn_mask"].is_contiguous()
+
+
+@pytest.mark.parametrize("fa_type", [None, "ascend_laser_attention"])
+def test_npu_causal_varlen_fallback_combines_padding_mask(monkeypatch, fa_type):
+    if fa_type is None:
+        monkeypatch.delenv("MINDIE_SD_FA_TYPE", raising=False)
+    else:
+        monkeypatch.setenv("MINDIE_SD_FA_TYPE", fa_type)
+    captured: dict = {}
+
+    def fake_attention_forward(query, key, value, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(query)
+
+    _fake_mindiesd(monkeypatch, attention_forward=fake_attention_forward)
+    impl = _npu_impl(causal=True)
+    query = torch.randn(1, 5, 2, 4)
+    metadata = AttentionMetadata(extra={"npu_attn_varlen": True, "valid_kv_length": 3})
+
+    impl.forward_fa_npu(query, query, query, metadata)
+
+    padding_mask = torch.arange(query.shape[1])[None] < 3
+    causal_mask = torch.ones(query.shape[1], query.shape[1], dtype=torch.bool).tril()
+    expected = padding_mask[:, None, None, :] & causal_mask[None, None]
+    assert torch.equal(captured["attn_mask"], expected)
+
+
+def test_npu_noncausal_without_explicit_mask_stays_unmasked(monkeypatch):
+    captured: dict = {}
+
+    def fake_attention_forward(query, key, value, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(query)
+
+    _fake_mindiesd(monkeypatch, attention_forward=fake_attention_forward)
+    query = torch.randn(1, 4, 2, 4)
+
+    _npu_impl(causal=False).forward_fa_npu(query, query, query)
+
+    assert captured["attn_mask"] is None
+
+
+# --- Test group D: laser input pre-scaling in _forward_prefix_kv_slice_npu --
 
 
 def test_prefix_kv_slice_applies_laser_input_scaling(monkeypatch):
