@@ -588,6 +588,20 @@ class FlashAttentionImpl(AttentionImpl[AttentionMetadata]):
         # So reuse SDPA's mask reshape logic: [B, S] -> [B, 1, Sq, Skv]
         attention_mask = _maybe_reshape_attn_mask(query, key, attention_mask, mask_mode="full_qk")
 
+        if self.causal:
+            # MindIE-SD's dense NPU path has no causal flag, so encode the
+            # constraint in an explicit boolean keep-mask (True means attend).
+            # Match FlashAttention's bottom-right alignment when Sq != Skv.
+            causal_mask = torch.ones(
+                (query.shape[1], key.shape[1]),
+                dtype=torch.bool,
+                device=query.device,
+            ).tril(diagonal=key.shape[1] - query.shape[1])
+            causal_mask = causal_mask[None, None]
+            attention_mask = (
+                causal_mask if attention_mask is None else torch.logical_and(attention_mask, causal_mask)
+            ).contiguous()
+
         layout = self.qkv_layout or "BNSD"
         return attention_forward(
             query,
