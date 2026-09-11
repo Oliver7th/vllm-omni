@@ -533,8 +533,7 @@ def _fake_mindiesd(monkeypatch, *, attention_forward=None, attention_forward_var
 def _fake_torch_npu(monkeypatch, *, npu_fusion_attention=None):
     """Install the minimal torch_npu surface used by causal NPU attention."""
     fake = SimpleNamespace(
-        npu_fusion_attention=npu_fusion_attention
-        or Mock(return_value=(torch.zeros(1), None, None, None, 0, 0, 0)),
+        npu_fusion_attention=npu_fusion_attention or Mock(return_value=(torch.zeros(1), None, None, None, 0, 0, 0)),
     )
     monkeypatch.setitem(sys.modules, "torch_npu", fake)
     return fake

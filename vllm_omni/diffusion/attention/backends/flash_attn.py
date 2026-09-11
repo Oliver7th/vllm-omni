@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 import os
-from functools import lru_cache, partial
+from functools import cache, partial
 
 import torch
 from vllm.logger import init_logger
@@ -19,7 +19,7 @@ from vllm_omni.platforms import current_omni_platform
 logger = init_logger(__name__)
 
 
-@lru_cache(maxsize=None)
+@cache
 def _get_npu_compressed_causal_mask(device: torch.device) -> torch.Tensor:
     """Return the shared block mask used by NPU right-down causal attention."""
     return torch.triu(
