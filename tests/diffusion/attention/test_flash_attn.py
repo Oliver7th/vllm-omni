@@ -746,6 +746,42 @@ def test_npu_causal_uses_native_right_down_mode(
     assert out is expected_out
 
 
+def test_npu_causal_composes_explicit_keep_mask(monkeypatch):
+    expected_out = torch.randn(1, 4, 2, 4)
+    fusion_attention = Mock(return_value=(expected_out, None, None, None, 0, 0, 0))
+    fake_torch_npu = _fake_torch_npu(monkeypatch, npu_fusion_attention=fusion_attention)
+    impl = FlashAttentionImpl(num_heads=2, head_size=4, softmax_scale=0.5, causal=True)
+    query = torch.randn(1, 4, 2, 4)
+    key_keep_mask = torch.tensor([[True, False, True, True]])
+
+    out = impl.forward_fa_npu(
+        query,
+        query,
+        query,
+        AttentionMetadata(attn_mask=key_keep_mask),
+    )
+
+    fake_torch_npu.npu_fusion_attention.assert_called_once()
+    kwargs = fake_torch_npu.npu_fusion_attention.call_args.kwargs
+    assert kwargs["sparse_mode"] == 1
+    assert kwargs["inner_precise"] == 2
+    expected_block_mask = torch.tensor(
+        [
+            [
+                [
+                    [False, True, True, True],
+                    [False, True, True, True],
+                    [False, True, False, True],
+                    [False, True, False, False],
+                ]
+            ]
+        ]
+    )
+    assert torch.equal(kwargs["atten_mask"], expected_block_mask)
+    assert kwargs["atten_mask"].is_contiguous()
+    assert out is expected_out
+
+
 def test_npu_noncausal_without_explicit_mask_stays_unmasked(monkeypatch):
     captured: dict = {}
 
