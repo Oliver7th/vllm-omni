@@ -503,11 +503,12 @@ def test_packed_varlen_metadata_must_be_complete(monkeypatch):
 #   - boundary resolution in ``_resolve_packed_seq_npu`` (pure Python, no device
 #     sync, no MindIE-SD import);
 #   - env dispatch in ``forward_fa_npu`` (which op a packed forward takes);
+#   - native torch_npu dispatch for right-down causal attention;
 #   - the laser input pre-scaling math in ``_forward_prefix_kv_slice_npu``.
 #
-# They run on CPU without a real NPU by injecting a fake ``mindiesd`` module
-# into ``sys.modules`` (same pattern as ``test_paged_attention`` /
-# ``benchmarks/conftest``). No production code is exercised for real kernels.
+# They run on CPU without a real NPU by injecting fake ``mindiesd`` and
+# ``torch_npu`` modules into ``sys.modules`` (same pattern as
+# ``test_paged_attention`` / ``benchmarks/conftest``). No real kernel runs.
 
 
 def _npu_impl(causal: bool = False) -> FlashAttentionImpl:
@@ -526,6 +527,16 @@ def _fake_mindiesd(monkeypatch, *, attention_forward=None, attention_forward_var
         attention_forward_varlen=attention_forward_varlen or Mock(return_value=torch.zeros(1)),
     )
     monkeypatch.setitem(sys.modules, "mindiesd", fake)
+    return fake
+
+
+def _fake_torch_npu(monkeypatch, *, npu_fusion_attention=None):
+    """Install the minimal torch_npu surface used by causal NPU attention."""
+    fake = SimpleNamespace(
+        npu_fusion_attention=npu_fusion_attention
+        or Mock(return_value=(torch.zeros(1), None, None, None, 0, 0, 0)),
+    )
+    monkeypatch.setitem(sys.modules, "torch_npu", fake)
     return fake
 
 
@@ -685,83 +696,55 @@ def test_npu_varlen_opt_in_unset_takes_mask_path(monkeypatch):
     assert out is fake_forward.return_value
 
 
-# --- Test group C: causal-mask materialization and composition ---------------
+# --- Test group C: native NPU causal attention dispatch ----------------------
 
 
-@pytest.mark.parametrize(("query_length", "key_length"), [(4, 4), (2, 4), (4, 2)])
-def test_npu_causal_mask_uses_bottom_right_alignment(monkeypatch, query_length, key_length):
-    captured: dict = {}
-
-    def fake_attention_forward(query, key, value, **kwargs):
-        captured.update(kwargs)
-        return torch.zeros_like(query)
-
-    _fake_mindiesd(monkeypatch, attention_forward=fake_attention_forward)
-    impl = _npu_impl(causal=True)
+@pytest.mark.parametrize(
+    ("query_length", "key_length", "expected_inner_precise"),
+    [(4, 4, 0), (2, 4, 0), (4, 2, 2)],
+)
+def test_npu_causal_uses_native_right_down_mode(
+    monkeypatch,
+    query_length,
+    key_length,
+    expected_inner_precise,
+):
+    expected_out = torch.randn(1, query_length, 2, 4)
+    fusion_attention = Mock(return_value=(expected_out, None, None, None, 0, 0, 0))
+    fake_torch_npu = _fake_torch_npu(monkeypatch, npu_fusion_attention=fusion_attention)
+    impl = FlashAttentionImpl(num_heads=8, head_size=4, softmax_scale=0.5, causal=True)
     query = torch.randn(1, query_length, 2, 4)
     key = torch.randn(1, key_length, 2, 4)
 
-    impl.forward_fa_npu(query, key, key)
+    out = impl.forward_fa_npu(query, key, key)
 
-    query_positions = torch.arange(query_length).unsqueeze(1)
-    key_positions = torch.arange(key_length).unsqueeze(0)
-    expected = key_positions <= query_positions + (key_length - query_length)
-    expected = expected[None, None]
-    assert torch.equal(captured["attn_mask"], expected)
-    assert captured["attn_mask"].is_contiguous()
+    fake_torch_npu.npu_fusion_attention.assert_called_once()
+    args, kwargs = fake_torch_npu.npu_fusion_attention.call_args
+    assert torch.equal(args[0], query)
+    assert torch.equal(args[1], key)
+    assert torch.equal(args[2], key)
+    assert all(tensor.is_contiguous() for tensor in args[:3])
+    assert kwargs["head_num"] == query.shape[2]
+    assert kwargs["input_layout"] == "BSND"
+    assert kwargs["scale"] == 0.5
+    assert kwargs["keep_prob"] == 1.0
+    assert kwargs["sparse_mode"] == 3
+    assert kwargs["inner_precise"] == expected_inner_precise
 
-
-def test_npu_causal_mask_combines_with_explicit_keep_mask(monkeypatch):
-    captured: dict = {}
-
-    def fake_attention_forward(query, key, value, **kwargs):
-        captured.update(kwargs)
-        return torch.zeros_like(query)
-
-    _fake_mindiesd(monkeypatch, attention_forward=fake_attention_forward)
-    impl = _npu_impl(causal=True)
-    query = torch.randn(2, 3, 2, 4)
-    key = torch.randn(2, 5, 2, 4)
-    keep_mask = torch.tensor(
+    block_mask = kwargs["atten_mask"]
+    assert block_mask.shape == (2048, 2048)
+    assert block_mask.dtype == torch.bool
+    assert block_mask.is_contiguous()
+    expected_corner = torch.tensor(
         [
-            [True, True, True, True, False],
-            [True, True, True, False, False],
+            [False, True, True, True],
+            [False, False, True, True],
+            [False, False, False, True],
+            [False, False, False, False],
         ]
     )
-
-    impl.forward_fa_npu(query, key, key, AttentionMetadata(attn_mask=keep_mask))
-
-    query_positions = torch.arange(query.shape[1]).unsqueeze(1)
-    key_positions = torch.arange(key.shape[1]).unsqueeze(0)
-    causal_mask = key_positions <= query_positions + (key.shape[1] - query.shape[1])
-    expected = keep_mask[:, None, None, :] & causal_mask[None, None]
-    assert torch.equal(captured["attn_mask"], expected)
-    assert captured["attn_mask"].is_contiguous()
-
-
-@pytest.mark.parametrize("fa_type", [None, "ascend_laser_attention"])
-def test_npu_causal_varlen_fallback_combines_padding_mask(monkeypatch, fa_type):
-    if fa_type is None:
-        monkeypatch.delenv("MINDIE_SD_FA_TYPE", raising=False)
-    else:
-        monkeypatch.setenv("MINDIE_SD_FA_TYPE", fa_type)
-    captured: dict = {}
-
-    def fake_attention_forward(query, key, value, **kwargs):
-        captured.update(kwargs)
-        return torch.zeros_like(query)
-
-    _fake_mindiesd(monkeypatch, attention_forward=fake_attention_forward)
-    impl = _npu_impl(causal=True)
-    query = torch.randn(1, 5, 2, 4)
-    metadata = AttentionMetadata(extra={"npu_attn_varlen": True, "valid_kv_length": 3})
-
-    impl.forward_fa_npu(query, query, query, metadata)
-
-    padding_mask = torch.arange(query.shape[1])[None] < 3
-    causal_mask = torch.ones(query.shape[1], query.shape[1], dtype=torch.bool).tril()
-    expected = padding_mask[:, None, None, :] & causal_mask[None, None]
-    assert torch.equal(captured["attn_mask"], expected)
+    assert torch.equal(block_mask[:4, :4], expected_corner)
+    assert out is expected_out
 
 
 def test_npu_noncausal_without_explicit_mask_stays_unmasked(monkeypatch):
