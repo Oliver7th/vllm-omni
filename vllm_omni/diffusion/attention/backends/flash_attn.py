@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 import os
-from functools import partial
+from functools import lru_cache, partial
 
 import torch
 from vllm.logger import init_logger
@@ -17,6 +17,15 @@ from vllm_omni.diffusion.config import get_current_diffusion_config_or_none
 from vllm_omni.platforms import current_omni_platform
 
 logger = init_logger(__name__)
+
+
+@lru_cache(maxsize=None)
+def _get_npu_compressed_causal_mask(device: torch.device) -> torch.Tensor:
+    """Return the shared block mask used by NPU right-down causal attention."""
+    return torch.triu(
+        torch.ones((2048, 2048), dtype=torch.bool, device=device),
+        diagonal=1,
+    ).contiguous()
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -549,6 +558,27 @@ class FlashAttentionImpl(AttentionImpl[AttentionMetadata]):
         value: torch.Tensor,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
+        if self.causal:
+            import torch_npu
+
+            # npu_fusion_attention uses True for blocked positions.  With the
+            # compressed upper-triangular mask, sparse_mode=3 applies
+            # FlashAttention's bottom-right causal alignment when Sq != Skv.
+            # Explicitly enable invalid-row handling for Sq > Skv; equal and
+            # shorter query sequences cannot contain fully masked causal rows.
+            return torch_npu.npu_fusion_attention(
+                query.contiguous(),
+                key.contiguous(),
+                value.contiguous(),
+                head_num=query.shape[2],
+                input_layout="BSND",
+                atten_mask=_get_npu_compressed_causal_mask(query.device),
+                scale=float(self.softmax_scale),
+                keep_prob=1.0,
+                inner_precise=2 if query.shape[1] > key.shape[1] else 0,
+                sparse_mode=3,
+            )[0]
+
         from mindiesd import attention_forward
 
         # Opt-in mask-free paths (mirror the CUDA cu_seqlens behavior): the
@@ -587,20 +617,6 @@ class FlashAttentionImpl(AttentionImpl[AttentionMetadata]):
         # But the incoming mask is 2D [B, S] — reshape to [B, 1, 1, S]
         # So reuse SDPA's mask reshape logic: [B, S] -> [B, 1, Sq, Skv]
         attention_mask = _maybe_reshape_attn_mask(query, key, attention_mask, mask_mode="full_qk")
-
-        if self.causal:
-            # MindIE-SD's dense NPU path has no causal flag, so encode the
-            # constraint in an explicit boolean keep-mask (True means attend).
-            # Match FlashAttention's bottom-right alignment when Sq != Skv.
-            causal_mask = torch.ones(
-                (query.shape[1], key.shape[1]),
-                dtype=torch.bool,
-                device=query.device,
-            ).tril(diagonal=key.shape[1] - query.shape[1])
-            causal_mask = causal_mask[None, None]
-            attention_mask = (
-                causal_mask if attention_mask is None else torch.logical_and(attention_mask, causal_mask)
-            ).contiguous()
 
         layout = self.qkv_layout or "BNSD"
         return attention_forward(
