@@ -137,9 +137,7 @@ def test_transformer_resolves_global_and_subcomponent_quant_configs(
             {"transformer": configs["transformer"], "language_model": configs["language"]}
         )
     elif config_kind == "transformer_gen_disabled":
-        top_level_config = ComponentQuantizationConfig(
-            {"transformer": configs["transformer"], "gen_layers": None}
-        )
+        top_level_config = ComponentQuantizationConfig({"transformer": configs["transformer"], "gen_layers": None})
     else:
         top_level_config = ComponentQuantizationConfig(
             {"language_model": configs["language"], "gen_layers": configs["gen"]}
